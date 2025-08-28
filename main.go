@@ -95,6 +95,25 @@ func handleCon(h *Hub, conn net.Conn) {
 	sc := bufio.NewScanner(conn)
 	for sc.Scan() {
 		line := sc.Text()
+		if len(line) > 6 && line[:5] == "/nick" {
+			old := client.name
+			client.name = line[6:]
+			client.out <- fmt.Sprintf("your nick is now %s", client.name)
+			h.broadcast <- fmt.Sprintf("* %s has changed their nick to --> %s <--", old, client.name)
+
+		}
+
+		if line == "/quit" {
+			h.deregistered <- client
+			conn.Close()
+			return
+		}
+
+		if line == "/users" {
+			for user := range h.clients {
+				client.out <- fmt.Sprintf("the user: %s", user.name)
+			}
+		}
 
 		h.broadcast <- fmt.Sprintf("[the user %s]: %s", client.name, line)
 	}
@@ -105,7 +124,7 @@ func handleCon(h *Hub, conn net.Conn) {
 	}
 
 	h.deregistered <- client
-	conn.Close()
+	defer conn.Close()
 
 }
 
