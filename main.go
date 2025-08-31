@@ -55,7 +55,7 @@ func (h *Hub) run() {
 				h.sendToAll(fmt.Sprintf("* %s has left the chat", c.name), c)
 			}
 			// case msg := <-h.broadcast:
-			// 	h.sendToAll(msg.content, msg.sender)
+			// 	h.sendToAll(msg.content, msg.sender)  //WILL ADD IT LATER))
 
 		}
 
@@ -82,7 +82,7 @@ func (r *Room) run() {
 				if c == msg.sender {
 					continue
 				}
-				c.out <- msg.content
+				c.out <- msg.content //Refactor by making a separate function to it or make an interface
 			}
 		}
 	}
@@ -168,7 +168,7 @@ func handleCon(h *Hub, conn net.Conn) {
 			if room != nil {
 				room.broadcast <- Message{content: fmt.Sprintf("[the user %s]: %s", client.name, line), sender: client}
 			} else {
-				client.out <- "You are not in a room. Use /join <room> first."
+				client.out <- "You are not in a room. Use /join <room> first." // fix this bulshit architecture, make a an option sending to main and rooms
 			}
 		}
 	}
