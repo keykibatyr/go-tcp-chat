@@ -17,6 +17,7 @@ type Hub struct {
 	registered   chan *Client
 	deregistered chan *Client
 	broadcast    chan Message
+	rooms		 map[string]*Room
 	clients      map[*Client]bool
 }
 
@@ -25,11 +26,18 @@ type Message struct {
 	content string
 }
 
+type Room struct{
+	name string
+	clients map[*Client]bool
+	broadcast chan Message
+}
+
 func newHub() *Hub {
 	return &Hub{
 		registered:   make(chan *Client),
 		deregistered: make(chan *Client),
 		broadcast:    make(chan Message),
+		rooms:        make(map[string]*Room),
 		clients:      make(map[*Client]bool),
 	}
 }
@@ -46,9 +54,13 @@ func (h *Hub) run() {
 				h.clients[c] = false
 				h.sendToAll(fmt.Sprintf("* %s has left the chat", c.name), c)
 			}
-		case msg := <-h.broadcast:
-			h.sendToAll(msg.content, msg.sender)
+		// case msg := <-h.broadcast:
+		// 	h.sendToAll(msg.content, msg.sender)
+		
 		}
+
+		
+		
 	}
 }
 
@@ -60,6 +72,20 @@ func (h *Hub) sendToAll(msg string, sender *Client) {
 		select {
 		case c.out <- msg:
 		default:
+		}
+	}
+}
+
+func (r *Room) run(){
+	for {
+		select{
+		case msg := <- r.broadcast:
+			for c := range r.clients{
+				if c == msg.sender{
+				continue
+			}
+				c.out <- msg.content
+			}
 		}
 	}
 }
@@ -104,6 +130,7 @@ func handleCon(h *Hub, conn net.Conn) {
 	for sc.Scan() {
 		line := sc.Text()
 
+
 		if len(line) > 6 && line[:5] == "/nick" {
 			old := client.name
 			client.name = line[6:]
@@ -118,9 +145,27 @@ func handleCon(h *Hub, conn net.Conn) {
 			conn.Close()
 			return
 		case line == "/users":
+			client.out <- fmt.Sprintf("Online users: (%d)", len(h.clients))
 			for user := range h.clients {
-				client.out <- fmt.Sprintf("the user: %s", user.name)
+				client.out <- fmt.Sprintf("-%s", user.name)
 			}
+		case len(line) > 8 && line[:7] == "/create":
+			room := &Room{
+				name: line[7:],
+				clients: make(map[*Client]bool),
+				broadcast: make(chan Message),
+			}
+			h.rooms[line[7:]] = room
+
+			go room.run()
+
+			client.out <- fmt.Sprintf("You successfully created a new Room (%s)", line[7:])
+
+		case len(line) > 5 && line[:5] == "/join":
+			room := h.rooms[line[5:]]
+			room.clients[client] = true
+			client.out <- fmt.Sprintf("You joined to the %s", room.name)
+
 		default:
 			h.broadcast <- Message{content: fmt.Sprintf("[the user %s]: %s", client.name, line), sender: client}
 		}
@@ -132,7 +177,6 @@ func handleCon(h *Hub, conn net.Conn) {
 	}
 
 	h.deregistered <- client
-	defer conn.Close()
 
 }
 
