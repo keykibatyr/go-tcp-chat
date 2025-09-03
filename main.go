@@ -32,6 +32,10 @@ type Room struct {
 	broadcast chan Message
 }
 
+type Broadcaster interface {
+	sendToAll(msg Message, sender *Client)
+}
+
 func newHub() *Hub {
 	return &Hub{
 		registered:   make(chan *Client),
@@ -54,8 +58,8 @@ func (h *Hub) run() {
 				h.clients[c] = false
 				h.sendToAll(fmt.Sprintf("* %s has left the chat", c.name), c)
 			}
-			// case msg := <-h.broadcast:
-			// 	h.sendToAll(msg.content, msg.sender)  //WILL ADD IT LATER))
+		case msg := <-h.broadcast:
+			h.sendToAll(msg.content, msg.sender) //WILL ADD IT LATER))
 
 		}
 
@@ -74,16 +78,20 @@ func (h *Hub) sendToAll(msg string, sender *Client) {
 	}
 }
 
+func (r *Room) sendToAll(msg string, sender *Client) {
+	for c := range r.clients {
+		if c == sender {
+			continue
+		}
+		c.out <- msg
+	}
+}
+
 func (r *Room) run() {
 	for {
 		select {
 		case msg := <-r.broadcast:
-			for c := range r.clients {
-				if c == msg.sender {
-					continue
-				}
-				c.out <- msg.content //Refactor by making a separate function to it or make an interface
-			}
+			r.sendToAll(msg.content, msg.sender)
 		}
 	}
 }
@@ -129,14 +137,6 @@ func handleCon(h *Hub, conn net.Conn) {
 	for sc.Scan() {
 		line := sc.Text()
 
-		if len(line) > 6 && line[:5] == "/nick" {
-			old := client.name
-			client.name = line[6:]
-			client.out <- fmt.Sprintf("your nick is now %s", client.name)
-			h.broadcast <- Message{content: fmt.Sprintf("* %s has changed their nick to --> %s <--", old, client.name), sender: client}
-
-		}
-
 		switch {
 		case line == "/quit":
 			h.deregistered <- client
@@ -164,6 +164,13 @@ func handleCon(h *Hub, conn net.Conn) {
 			room.clients[client] = true
 			client.out <- fmt.Sprintf("You joined to the %s", room.name)
 
+		case len(line) > 6 && line[:5] == "/nick":
+			old := client.name
+			client.name = line[6:]
+			client.out <- fmt.Sprintf("your nick is now %s", client.name)
+			room.broadcast <- Message{content: fmt.Sprintf("* %s has changed their nick to --> %s <--", old, client.name), sender: client}
+
+
 		default:
 			if room != nil {
 				room.broadcast <- Message{content: fmt.Sprintf("[the user %s]: %s", client.name, line), sender: client}
@@ -183,8 +190,13 @@ func handleCon(h *Hub, conn net.Conn) {
 }
 
 func writer(client *Client) {
+	fmt.Println("Writer started for", client.name)
 	for msg := range client.out {
 		fmt.Fprintln(client.conn, msg)
 	}
-	fmt.Println("Writer started for", client.name)
 }
+
+
+//making the client logging more complex (relogging opportunity)
+//not allowing overwrite the already existing room by creating the room with same name
+//handle the double main() func trouble
