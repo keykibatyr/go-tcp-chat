@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"context"
 	"net"
 )
 
@@ -11,12 +12,14 @@ type Client struct {
 	name string
 	conn net.Conn
 	out  chan string
+	room *Room
 }
 
 type Hub struct {
 	registered   chan *Client
 	deregistered chan *Client
 	broadcast    chan Message
+	createreq 	chan string
 	rooms        map[string]*Room
 	clients      map[*Client]bool
 }
@@ -41,14 +44,31 @@ func newHub() *Hub {
 		registered:   make(chan *Client),
 		deregistered: make(chan *Client),
 		broadcast:    make(chan Message),
+		createreq: 	  make(chan string),
 		rooms:        make(map[string]*Room),
 		clients:      make(map[*Client]bool),
 	}
 }
 
-func (h *Hub) run() {
+func (h *Hub) run(ctx context.Context) {
 	for {
 		select {
+		case room_name := <- h.createreq:
+			ctx, cancel := context.WithCancel(context.Background())
+
+			defer cancel()
+
+			room := &Room{
+				name:      room_name,
+				clients:   make(map[*Client]bool),
+				broadcast: make(chan Message),
+			}
+			
+			h.rooms[room_name] = room
+			go room.run(ctx)
+
+		case <- ctx.Done():
+			return
 		case c := <-h.registered:
 			h.clients[c] = true
 			h.sendToAll(fmt.Sprintf("* %s has joined the chat", c.name), c)
@@ -62,7 +82,6 @@ func (h *Hub) run() {
 			h.sendToAll(msg.content, msg.sender) //WILL ADD IT LATER))
 
 		}
-
 	}
 }
 
@@ -87,9 +106,11 @@ func (r *Room) sendToAll(msg string, sender *Client) {
 	}
 }
 
-func (r *Room) run() {
+func (r *Room) run(ctx context.Context) {
 	for {
 		select {
+		case <- ctx.Done():
+			return
 		case msg := <-r.broadcast:
 			r.sendToAll(msg.content, msg.sender)
 		}
@@ -102,13 +123,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	ctx, cancel := context.WithCancel(context.Background())
+	
 	log.Println("chat server listening on :3000")
 
-	defer listener.Close()
+	defer func () {
+		cancel()
+
+		listener.Close()
+	}()
 
 	hub := newHub()
-	go hub.run()
+	go hub.run(ctx)
 
 	for {
 		conn, err := listener.Accept()
@@ -123,23 +149,40 @@ func main() {
 }
 
 func handleCon(h *Hub, conn net.Conn) {
+
 	client := &Client{
 		name: conn.RemoteAddr().String(),
 		conn: conn,
 		out:  make(chan string),
+		room: nil,
 	}
-	h.registered <- client
-	go writer(client)
 
-	defer conn.Close()
+	h.registered <- client
+
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	defer func () {
+
+		h.deregistered <- client
+
+		close(client.out)
+
+		cancel()
+
+		conn.Close()
+
+	} ()
+
+	go writer(ctx, client)
+
 	sc := bufio.NewScanner(conn)
-	var room *Room
 	for sc.Scan() {
 		line := sc.Text()
 
 		switch {
 		case line == "/quit":
 			h.deregistered <- client
+			delete(h.clients, client)
 			conn.Close()
 			return
 		case line == "/users":
@@ -148,32 +191,26 @@ func handleCon(h *Hub, conn net.Conn) {
 				client.out <- fmt.Sprintf("-%s", user.name)
 			}
 		case len(line) > 8 && line[:7] == "/create":
-			room = &Room{
-				name:      line[8:],
-				clients:   make(map[*Client]bool),
-				broadcast: make(chan Message),
-			}
-			h.rooms[line[8:]] = room
-
-			go room.run()
+			// go room.run(ctx)  //add context 
+			h.createreq <- fmt.Sprint(line[8:])
 			log.Println("Sending to", client.name, ":", line)
 			client.out <- fmt.Sprintf("You successfully created a new Room (%s)", line[8:])
 
 		case len(line) > 5 && line[:5] == "/join":
-			room = h.rooms[line[6:]]
-			room.clients[client] = true
-			client.out <- fmt.Sprintf("You joined to the %s", room.name)
+			client.room = h.rooms[line[6:]]
+			client.room.clients[client] = true
+			client.out <- fmt.Sprintf("You joined to the %s", client.room.name)
 
 		case len(line) > 6 && line[:5] == "/nick":
 			old := client.name
 			client.name = line[6:]
 			client.out <- fmt.Sprintf("your nick is now %s", client.name)
-			room.broadcast <- Message{content: fmt.Sprintf("* %s has changed their nick to --> %s <--", old, client.name), sender: client}
+			client.room.broadcast <- Message{content: fmt.Sprintf("* %s has changed their nick to --> %s <--", old, client.name), sender: client}
 
 
 		default:
-			if room != nil {
-				room.broadcast <- Message{content: fmt.Sprintf("[the user %s]: %s", client.name, line), sender: client}
+			if client.room != nil {
+				client.room.broadcast <- Message{content: fmt.Sprintf("[the user %s]: %s", client.name, line), sender: client}
 			} else {
 				client.out <- "You are not in a room. Use /join <room> first." // fix this bulshit architecture, make a an option sending to main and rooms
 			}
@@ -185,14 +222,22 @@ func handleCon(h *Hub, conn net.Conn) {
 		log.Println("scanner error:", err)
 	}
 
-	h.deregistered <- client
+	
 
 }
 
-func writer(client *Client) {
+func writer(ctx context.Context, client *Client) {
 	fmt.Println("Writer started for", client.name)
-	for msg := range client.out {
-		fmt.Fprintln(client.conn, msg)
+	for{
+		select{
+		case msg, err := <- client.out:
+			if !err {
+				return
+			}
+			fmt.Fprintln(client.conn, msg)
+		case <- ctx.Done():
+			return
+		}
 	}
 }
 
